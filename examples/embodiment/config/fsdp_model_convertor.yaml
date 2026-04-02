@@ -1,0 +1,48 @@
+defaults:
+  - model/smolvla@model  # 改为 smolvla 模型配置
+  - override hydra/job_logging: stdout
+  - _self_  # 添加 _self_ 以确保正确的配置合并顺序
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config
+
+convertor:
+  save_path: /workspace/checkpoints/torch/smolvla_dsrl_converted  # 转换后的模型保存路径（容器内路径）
+  
+  # FSDP 检查点路径（来自 RLinf 训练的输出）
+  # 格式：../results/<experiment_name>/checkpoints/global_step_<step>/actor/
+  ckpt_path: /workspace/examples/results/realworld_ros_robot_dsrl_smolvla/checkpoints/global_step_2/actor/model_state_dict/full_weights.pt # ← 修改为你的 FSDP 检查点路径（容器内路径）
+  
+  merge_lora_weighs: False  # DSRL SmolVLA 不使用 LoRA，设为 False
+
+# Override the default values in model/smolvla
+model:
+  model_type: "smolvla"
+  
+  # 预训练 SmolVLA 模型路径（用于加载基础架构）
+  # 使用 local: 前缀标识这是本地路径，不是 HuggingFace repo_id
+  model_path: "/workspace/checkpoints/torch/smolvla_pickup/checkpoints/last/pretrained_model"  # ← 你的原始预训练模型路径
+  
+  # DSRL 特定配置
+  use_lerobot_checkpoint: True
+  main_image_key: "observation.images.front"
+  action_dim: 16
+  state_dim: 14
+  num_action_chunks: 50
+  precision: "fp32"
+  add_value_head: False
+  use_dsrl: True
+  dsrl_state_dim: 14
+  dsrl_action_noise_dim: 32
+  dsrl_num_q_heads: 10
+  dsrl_image_latent_dim: 64
+  dsrl_state_latent_dim: 64
+  dsrl_hidden_dims: [128, 128, 128]
+  freeze_vision_encoder: null
+  train_expert_only: True
+  is_lora: False  # 不使用 LoRA
+  lora_rank: 32   # 即使不使用也要保持配置兼容

@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# 训练结果和日志
+results/
+logs/
+*.log
+*.out
+*.err
+
+# 模型检查点
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+checkpoints/
+*.distcp
+
+# 数据集
+data/
+datasets/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 临时文件
+tmp/
+temp/
+*.tmp
