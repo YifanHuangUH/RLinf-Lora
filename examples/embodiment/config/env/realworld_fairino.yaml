@@ -12,7 +12,7 @@ use_fixed_reset_state_ids: False
 max_steps_per_rollout_epoch: 100
 max_episode_steps: 50 #100  # Use intuitive naming; code supports both this and max_num_steps
 use_spacemouse: False
-use_terminal_reward_wrapper: False
+use_terminal_reward_wrapper: True
 keyboard_reward_wrapper: null  # Changed to null to disable human evaluation during training
 use_custom_reward: False
 # 自动评估配置（用于训练阶段，避免人工阻塞）

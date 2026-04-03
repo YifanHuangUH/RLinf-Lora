@@ -19,7 +19,7 @@ import time
 
 from dataclasses import dataclass, field
 from importlib import import_module
-from typing import Optional, Protocol
+from typing import Protocol
 
 import gymnasium as gym
 import numpy as np
@@ -80,16 +80,11 @@ class RosRobotConfig:
     success_reward: float = 1.0
     failure_penalty: float = -1.0
     step_penalty: float = -0.01
-    keyboard_reward_wrapper: Optional[str] = None  # Changed from "single_stage" to None
+    keyboard_reward_wrapper: str = "single_stage"  # "single_stage" | "multi_stage" | null
     use_terminal_reward_wrapper: bool = False  # Enable terminal-based human reward input
     dsrl_step_reward: float = -1.0
     dsrl_success_terminal_reward: float = 0.0
     dsrl_failure_terminal_reward: float = -1.0
-    
-    # 自动评估配置（用于训练阶段，避免人工阻塞）
-    auto_evaluate: bool | str = True       # True: 始终自动，False/null: 始终人工，'after_warmup': 预热后自动
-    warmup_steps: int = 10                 # 前 N 个 step 使用人工标注（Replay Buffer 积累期）
-    success_threshold: float = -10.0       # return > -10 视为成功
 
 
 class RosRobotEnv(gym.Env):
@@ -118,20 +113,10 @@ class RosRobotEnv(gym.Env):
         self.success_reward = getattr(config, 'success_reward', 1.0)
         self.failure_penalty = getattr(config, 'failure_penalty', -1.0)
         self.step_penalty = getattr(config, 'step_penalty', -0.01)
-        self.keyboard_reward_wrapper = getattr(config, 'keyboard_reward_wrapper', None)  # Changed default to None
+        self.keyboard_reward_wrapper = getattr(config, 'keyboard_reward_wrapper', 'single_stage')
         self.dsrl_step_reward = getattr(config, 'dsrl_step_reward', -1.0)
         self.dsrl_success_terminal_reward = getattr(config, 'dsrl_success_terminal_reward', 0.0)
         self.dsrl_failure_terminal_reward = getattr(config, 'dsrl_failure_terminal_reward', -1.0)
-        
-        # 自动评估配置（优先级高于 keyboard_reward_wrapper）
-        self.auto_evaluate = getattr(config, 'auto_evaluate', False)
-        self.warmup_steps = getattr(config, 'warmup_steps', 10)
-        self.success_threshold = getattr(config, 'success_threshold', -10.0)
-        
-        # 初始化日志记录器
-        from rlinf.utils.logging import get_logger
-        self.logger = get_logger()
-        
         self.prev_step_reward = torch.zeros(1, dtype=torch.float32)  # [B, ]
         self._episode_evaluated = False
         
@@ -252,48 +237,20 @@ class RosRobotEnv(gym.Env):
 
     def _should_keyboard_evaluate(self) -> bool:
         """
-        智能评估策略：基于训练阶段动态切换
-        - 训练初期（global_step 小）：人工标注，积累高质量数据
-        - 训练后期（global_step 大）：自动评估，加速流程
-        
-        配置方式：
-        - auto_evaluate=True: 始终自动评估
-        - auto_evaluate=False + keyboard_reward_wrapper: 始终人工评估
-        - auto_evaluate='after_warmup': 预热后自动评估（需要设置 warmup_steps）
+        仅在 Rollout 阶段（数据收集）启用人工评估
+        SAC 训练阶段从重放缓冲区采样时不应触发人工标注
         """
-        # === 模式 1: 显式启用自动评估 ===
-        if hasattr(self.config, 'auto_evaluate') and self.config.auto_evaluate is True:
-            return False
-        
-        # === 模式 2: 基于训练阶段智能切换 ===
-        if hasattr(self.config, 'auto_evaluate') and self.config.auto_evaluate == 'after_warmup':
-            # 检查是否过了预热期
-            warmup_steps = getattr(self.config, 'warmup_steps', 10)
-            
-            # 尝试从 worker_info 获取 global_step
-            if hasattr(self, 'worker_info') and self.worker_info is not None:
-                if hasattr(self.worker_info, 'global_step'):
-                    current_step = self.worker_info.global_step
-                    if current_step >= warmup_steps:
-                        return False  # 过了预热期，使用自动评估
-            
-            # 如果没有 worker_info，尝试从 config 获取
-            if hasattr(self.config, 'global_step'):
-                current_step = self.config.global_step
-                if current_step >= warmup_steps:
-                    return False
-        
-        # === 模式 3: 检查 keyboard_reward_wrapper ===
+        # 检查 keyboard_reward_wrapper 是否为有效值（排除 null/None/空字符串）
         if self.keyboard_reward_wrapper is not None:
             wrapper = str(self.keyboard_reward_wrapper).lower()
             if wrapper not in {"", "none", "null", "false"}:
                 return True
         
-        # === 模式 4: 检查 use_terminal_reward_wrapper ===
+        # 检查是否在配置中设置了 use_terminal_reward_wrapper 为 True
         if hasattr(self.config, 'use_terminal_reward_wrapper'):
             return bool(self.config.use_terminal_reward_wrapper)
         
-        # 默认禁用人工评估
+        # 默认禁用人工评估（适用于 SAC 训练阶段）
         return False
 
     def _query_episode_success(self) -> bool:
@@ -302,8 +259,8 @@ class RosRobotEnv(gym.Env):
         训练阶段使用自动评估，评估阶段可保留人工标注
         """
         # === 模式 1: 自动评估（基于 episode return）===
-        if self.auto_evaluate:
-            threshold = self.success_threshold
+        if hasattr(self.config, 'auto_evaluate') and self.config.auto_evaluate:
+            threshold = getattr(self.config, 'success_threshold', -10.0)
             # 使用累积的 episode_return
             episode_return = self.episode_return
             success = (episode_return > threshold)
