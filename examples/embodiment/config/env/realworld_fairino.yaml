@@ -1,0 +1,76 @@
+env_type: realworld
+
+total_num_envs: null
+
+auto_reset: True
+ignore_terminations: False #True
+reward_mode: dsrl_terminal
+wrap_obs_mode: simple
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 100
+max_episode_steps: 50 #100  # Use intuitive naming; code supports both this and max_num_steps
+use_spacemouse: False
+use_terminal_reward_wrapper: False
+keyboard_reward_wrapper: null  # Changed to null to disable human evaluation during training
+use_custom_reward: False
+# 自动评估配置（用于训练阶段，避免人工阻塞）
+auto_evaluate: after_warmup  # 'after_warmup': 预热后自动评估，True: 始终自动，False/null: 始终人工
+warmup_steps: 10             # 前 10 个 step 使用人工标注（Replay Buffer 积累期）
+success_threshold: -10.0     # return > -10 视为成功
+main_image_key: observation.images.front
+no_gripper: False
+use_pose_wrappers: False
+
+video_cfg:
+  save_video: True
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+init_params:
+  id: "RosRobotEnv-v1"
+  num_envs: null
+
+override_cfg:
+  is_dummy: True  # Changed to True for headless debugging without real robot connection
+  state_dim: 14
+  action_dim: 16
+  step_frequency: 10.0
+  max_num_steps: 50
+  image_shape: [224, 224, 3]
+
+  # Fairino joint names (14-DOF example: 7 per arm)
+  joint_names:
+    - "right_joint_1.pos"
+    - "right_joint_2.pos"
+    - "right_joint_3.pos"
+    - "right_joint_4.pos"
+    - "right_joint_5.pos"
+    - "right_joint_6.pos"
+    - "right_joint_7.pos"
+    - "left_joint_1.pos"
+    - "left_joint_2.pos"
+    - "left_joint_3.pos"
+    - "left_joint_4.pos"
+    - "left_joint_5.pos"
+    - "left_joint_6.pos"
+    - "left_joint_7.pos"
+
+  # Action scaling: [position_scale, orientation_scale, gripper_scale]
+  action_scale: [0.01, 0.05, 1.0]
+
+  # ROS2 adapter
+  adapter_cls: "rlinf.envs.realworld.ros_robot.ros2_jointstate_adapter.Ros2JointStateAdapter"
+  qos_history_depth: 10
+
+  # --- Fairino ROS2 topics (fill in your actual topic names) ---
+  state_topic: "/fairino/joint_states"
+  command_topic: "/fairino/joint_cmd"
+  gripper_command_topic: "/fairino/gripper_cmd"
+
+  camera_keys: ["observation.images.front", "observation.images.left", "observation.images.right"]
+  image_topics:
+    observation.images.front: "/fairino/camera/front/image_raw"
+    observation.images.left: "/fairino/camera/left/image_raw"
+    observation.images.right: "/fairino/camera/right/image_raw"

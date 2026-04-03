@@ -1,0 +1,22 @@
+model_type: "pi05_lerobot"
+
+model_path: ""
+image_keys: ["observation.images.front"]
+freeze_vision_encoder: null
+train_expert_only: true
+use_dsrl: False
+dsrl_state_dim: 14
+dsrl_action_noise_dim: 14
+dsrl_num_q_heads: 2
+dsrl_image_latent_dim: 64
+dsrl_state_latent_dim: 64
+dsrl_hidden_dims: [128, 128, 128]
+
+state_dim: 14
+action_dim: 16
+num_action_chunks: 50
+
+precision: "bf16"
+
+is_lora: False
+lora_rank: 32

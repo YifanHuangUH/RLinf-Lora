@@ -149,7 +149,7 @@ class SmolVLALeRobotPolicyAdapter(nn.Module, BasePolicy):
                 "dsrl_action_noise_net",
                 "actor_image_encoder",
                 "actor_state_encoder",
-                "critic_image_encoder", 
+                "critic_image_encoder",
                 "critic_state_encoder",
                 "q_head"
             ]
@@ -159,9 +159,23 @@ class SmolVLALeRobotPolicyAdapter(nn.Module, BasePolicy):
             for name, param in self.named_parameters():
                 if any(comp in name for comp in dsrl_components):
                     logger.info(f"  Found DSRL param: {name[:100]} -> requires_grad={param.requires_grad}")
-                    if not param.requires_grad:
-                        param.requires_grad = True
-                        logger.info(f"[DSRL init] Set requires_grad=True for: {name[:80]}")
+            
+            # IMPORTANT: Directly unfreeze the DSRL component modules themselves (not just parameters)
+            # This ensures the requires_grad flag persists through FSDP wrapping
+            if hasattr(self, 'dsrl_action_noise_net'):
+                self.dsrl_action_noise_net.requires_grad_(True)
+            if hasattr(self, 'actor_image_encoder'):
+                self.actor_image_encoder.requires_grad_(True)
+            if hasattr(self, 'actor_state_encoder'):
+                self.actor_state_encoder.requires_grad_(True)
+            if hasattr(self, 'critic_image_encoder'):
+                self.critic_image_encoder.requires_grad_(True)
+            if hasattr(self, 'critic_state_encoder'):
+                self.critic_state_encoder.requires_grad_(True)
+            if hasattr(self, 'q_head'):
+                self.q_head.requires_grad_(True)
+            
+            logger.info("[DSRL init] Directly set requires_grad=True on all DSRL component modules")
 
         if self._lerobot_num_action_chunks != self._num_action_chunks:
             logger.warning(
@@ -170,6 +184,20 @@ class SmolVLALeRobotPolicyAdapter(nn.Module, BasePolicy):
                 self._num_action_chunks,
                 self._lerobot_num_action_chunks,
             )
+        if self.use_dsrl:
+            # Final verification that critic components are trainable
+            logger.info("[DSRL init] Final verification of critic component trainability...")
+            critic_components = ["critic_image_encoder", "critic_state_encoder", "q_head"]
+            for comp in critic_components:
+                if hasattr(self, comp):
+                    module = getattr(self, comp)
+                    # Double-check requires_grad
+                    module.requires_grad_(True)
+                    trainable_count = sum(p.requires_grad for p in module.parameters())
+                    total_count = sum(1 for _ in module.parameters())
+                    logger.info(f"[DSRL init] {comp}: {trainable_count}/{total_count} params trainable")
+                    if trainable_count == 0:
+                        raise RuntimeError(f"Failed to initialize {comp} with trainable parameters!")
 
     @staticmethod
     def _resolve_lerobot_num_action_chunks(
@@ -300,11 +328,11 @@ class SmolVLALeRobotPolicyAdapter(nn.Module, BasePolicy):
 
         When ``train_expert_only`` is set, this method:
         1. Applies LeRobot-level freeze flags (VLM backbone via
-           ``set_requires_grad``).
+        ``set_requires_grad``).
         2. If ``use_dsrl`` is also enabled, additionally freezes the action
-           expert (``lm_expert``) and flow-matching projection layers so
-           that only the lightweight DSRL actor/critic modules receive
-           gradients.
+        expert (``lm_expert``) and flow-matching projection layers so
+        that only the lightweight DSRL actor/critic modules receive
+        gradients.
 
         This consolidates the previous ``_apply_lerobot_freeze_config`` and
         ``_freeze_for_dsrl`` into a single method, mirroring
@@ -362,23 +390,46 @@ class SmolVLALeRobotPolicyAdapter(nn.Module, BasePolicy):
                 )
 
         # 2b. Freeze flow-matching projection layers.
+        # IMPORTANT: Only freeze projection layers within LeRobot's model,
+        # NOT any DSRL components that might have similar names.
         projection_names = [
             "action_in_proj",
-            "action_out_proj",
+            "action_out_proj", 
             "action_time_mlp_in",
             "action_time_mlp_out",
             "state_proj",
         ]
+        
+        # Define DSRL component names to exclude from freezing
+        dsrl_component_names = [
+            "dsrl_action_noise_net",
+            "actor_image_encoder",
+            "actor_state_encoder",
+            "critic_image_encoder",
+            "critic_state_encoder",
+            "q_head"
+        ]
+        
         frozen_count = 0
         for name, param in model.named_parameters():
-            # Check if any projection name appears as a complete component in the parameter path
-            # This prevents accidentally freezing critic_state_encoder when freezing state_proj
+            # Skip any DSRL component parameters
+            skip = False
+            for dsrl_name in dsrl_component_names:
+                if dsrl_name in name:
+                    skip = True
+                    break
+            if skip:
+                continue
+            
+            # Check if this is a projection layer we want to freeze
             for proj_name in projection_names:
                 # Match either: ".proj_name." or ".proj_name" at end of string
                 if f".{proj_name}." in name or name.endswith(f".{proj_name}"):
                     param.requires_grad = False
                     frozen_count += 1
+                    logger.debug(f"[DSRL freeze] Froze projection: {name}")
                     break
+        
         logger.info(
             "[DSRL freeze] Froze %d projection-layer parameters (%s)",
             frozen_count,
@@ -387,61 +438,66 @@ class SmolVLALeRobotPolicyAdapter(nn.Module, BasePolicy):
 
         # 2c. Explicitly unfreeze DSRL actor/critic components to ensure they are trainable
         dsrl_unfrozen_count = 0
-        dsrl_components = [
-            "dsrl_action_noise_net",
-            "actor_image_encoder",
-            "actor_state_encoder", 
-            "critic_image_encoder",
-            "critic_state_encoder",
-            "q_head"
-        ]
         
         # Debug: Check both self and model parameters to handle LoRA cases
         logger.info("[DSRL unfreeze] Checking parameters in both self and model...")
         
-        # First try to unfreeze from self (for non-LoRA case)
+        # First, unfreeze from self (for non-LoRA case)
         debug_count = 0
+        total_dsrl_params = 0
+        
+        # List ALL parameters that contain any DSRL component name
         for name, param in self.named_parameters():
-            if any(comp in name for comp in dsrl_components):
-                if debug_count < 5:
-                    logger.info(f"[DSRL unfreeze][self] Found: {name[:100]} -> requires_grad={param.requires_grad}")
+            if any(comp in name for comp in dsrl_component_names):
+                total_dsrl_params += 1
+                if debug_count < 20:  # Print first 20 matches
+                    logger.info(f"[DSRL unfreeze][self] #{debug_count}: {name[:120]} -> requires_grad={param.requires_grad}")
                     debug_count += 1
                 
+                # Always unfreeze regardless of current state
                 if not param.requires_grad:
                     param.requires_grad = True
                     dsrl_unfrozen_count += 1
+        
+        logger.info(f"[DSRL unfreeze] Total DSRL params found in self: {total_dsrl_params}, unfroze: {dsrl_unfrozen_count}")
         
         # Also check model parameters (for LoRA case where params might be under base_model)
         if hasattr(self, 'lerobot_policy') and hasattr(self.lerobot_policy, 'model'):
             inner_model = self.lerobot_policy.model
+            model_debug_count = 0
+            model_total_dsrl_params = 0
+            
             for name, param in inner_model.named_parameters():
-                if any(comp in name for comp in dsrl_components):
-                    if debug_count < 10:  # Print more for debugging
-                        logger.info(f"[DSRL unfreeze][model] Found: {name[:100]} -> requires_grad={param.requires_grad}")
-                        debug_count += 1
+                if any(comp in name for comp in dsrl_component_names):
+                    model_total_dsrl_params += 1
+                    if model_debug_count < 20:  # Print first 20 matches
+                        logger.info(f"[DSRL unfreeze][inner_model] #{model_debug_count}: {name[:120]} -> requires_grad={param.requires_grad}")
+                        model_debug_count += 1
                     
                     if not param.requires_grad:
                         param.requires_grad = True
                         dsrl_unfrozen_count += 1
-
-        # 2d. Explicitly unfreeze all DSRL actor/critic components to ensure they are trainable
-        dsrl_components = [
-            "dsrl_action_noise_net",
-            "actor_image_encoder",
-            "actor_state_encoder", 
-            "critic_image_encoder",
-            "critic_state_encoder",
-            "q_head"
-        ]
+            
+            logger.info(f"[DSRL unfreeze] Total DSRL params found in inner_model: {model_total_dsrl_params}, unfroze: {dsrl_unfrozen_count - total_dsrl_params}")
         
-        dsrl_unfrozen_count = 0
-        for name, param in self.named_parameters():
-            if any(comp in name for comp in dsrl_components):
-                if not param.requires_grad:
-                    param.requires_grad = True
-                    dsrl_unfrozen_count += 1
+        # 2d. Force unfreeze at module level for all DSRL components
+        logger.info("[DSRL unfreeze] Force unfreezing DSRL component modules...")
+        for comp_name in dsrl_component_names:
+            # Check if component exists in self
+            if hasattr(self, comp_name):
+                module = getattr(self, comp_name)
+                # Use requires_grad_() on the module to ensure all submodules are unfrozen
+                module.requires_grad_(True)
+                logger.info(f"[DSRL unfreeze] Module {comp_name} forced to requires_grad=True")
+            
+            # Also check in lerobot_policy.model for LoRA case
+            if hasattr(self, 'lerobot_policy') and hasattr(self.lerobot_policy, 'model'):
+                if hasattr(self.lerobot_policy.model, comp_name):
+                    module = getattr(self.lerobot_policy.model, comp_name)
+                    module.requires_grad_(True)
+                    logger.info(f"[DSRL unfreeze] Module {comp_name} in inner_model forced to requires_grad=True")
         
-        # 2d. Log final trainable parameter summary
+        # 2e. Log final trainable parameter summary
         trainable = sum(
             p.numel() for p in self.parameters() if p.requires_grad
         )
@@ -457,6 +513,29 @@ class SmolVLALeRobotPolicyAdapter(nn.Module, BasePolicy):
             f"{total:,}",
             100.0 * trainable / total if total else 0,
         )
+        
+        # 2f. Verify critic components are trainable
+        logger.info("[DSRL freeze] Verifying critic component trainability...")
+        critic_components = ["critic_image_encoder", "critic_state_encoder", "q_head"]
+        for comp in critic_components:
+            trainable_params = 0
+            total_params = 0
+            for name, param in self.named_parameters():
+                if comp in name:
+                    total_params += 1
+                    if param.requires_grad:
+                        trainable_params += 1
+            logger.info(f"[DSRL freeze] {comp}: {trainable_params}/{total_params} parameters trainable")
+            if trainable_params == 0 and total_params > 0:
+                logger.error(f"[DSRL freeze] CRITICAL: {comp} has no trainable parameters! This will cause optimizer creation to fail.")
+        
+        # 2g. IMPORTANT: Also verify at module level (handles FSDP wrapped cases)
+        logger.info("[DSRL freeze] Module-level requires_grad verification:")
+        for comp_name in dsrl_component_names:
+            if hasattr(self, comp_name):
+                module = getattr(self, comp_name)
+                module_requires_grad = next(module.parameters()).requires_grad
+                logger.info(f"[DSRL freeze] Module {comp_name}: requires_grad={module_requires_grad}")
 
     def _to_lerobot_batch(self, env_obs: dict[str, Any]) -> dict[str, Any]:
         states = env_obs["states"]

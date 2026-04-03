@@ -1,0 +1,31 @@
+model_type: "smolvla"
+
+model_path: ""
+use_lerobot_checkpoint: False
+lerobot_src_path: null
+main_image_key: "observation.images.front"
+freeze_vision_encoder: null
+train_expert_only: null
+train_state_proj: null
+use_dsrl: False
+dsrl_state_dim: 14
+dsrl_action_noise_dim: 14
+dsrl_num_q_heads: 2
+dsrl_image_latent_dim: 64
+dsrl_state_latent_dim: 64
+dsrl_hidden_dims: [128, 128, 128]
+
+policy_setup: "panda-smolvla"
+image_size: [3, 224, 224]
+state_dim: 14
+action_dim: 14
+num_action_chunks: 1
+hidden_dim: 512
+
+precision: "bf16"
+add_value_head: True
+min_std: 1.0e-4
+max_std: 10.0
+
+is_lora: False
+lora_rank: 32

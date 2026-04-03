@@ -1,0 +1,39 @@
+env_type: realworld
+
+total_num_envs: null
+
+auto_reset: True
+ignore_terminations: True
+reward_mode: dsrl_terminal
+wrap_obs_mode: simple
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 50
+max_episode_steps: 50
+use_spacemouse: False
+use_terminal_reward_wrapper: True
+keyboard_reward_wrapper: null  # "single_stage" | "multi_stage" | null
+use_custom_reward: False
+main_image_key: observation.images.front
+no_gripper: False
+use_pose_wrappers: False
+
+video_cfg:
+  save_video: False
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+init_params:
+  id: "RosRobotEnv-v1"
+  num_envs: null
+
+override_cfg:
+  is_dummy: True
+  state_dim: 14
+  action_dim: 16
+  camera_keys: ["observation.images.front", "observation.images.left", "observation.images.right"]
+  image_topics:
+    observation.images.front: "/camera/front/image_raw"
+    observation.images.left: "/camera/left/image_raw"
+    observation.images.right: "/camera/right/image_raw"

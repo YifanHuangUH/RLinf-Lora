@@ -1,0 +1,144 @@
+# Copyright 2025 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import threading
+import time
+
+import numpy as np
+from rlinf.utils.logging import get_logger
+
+
+class Ros2JointStateAdapter:
+    """ROS2 adapter that bridges JointState topics to RLinf RosRobotEnv."""
+
+    def __init__(self, config, worker_info=None, hardware_info=None):
+        self.config = config
+        self.worker_info = worker_info
+        self.hardware_info = hardware_info
+        self._logger = get_logger()
+        self._lock = threading.Lock()
+        self._latest_joint_state: dict[str, float] = {}
+        self._latest_frames: dict[str, np.ndarray] = {}
+
+        try:
+            import rclpy
+            from rclpy.qos import QoSProfile
+            from sensor_msgs.msg import Image, JointState
+        except ImportError as exc:
+            raise ImportError(
+                "ROS2 runtime packages are required for Ros2JointStateAdapter "
+                "(rclpy, sensor_msgs)."
+            ) from exc
+
+        self._rclpy = rclpy
+        self._JointState = JointState
+        self._Image = Image
+        self._qos = QoSProfile(depth=self.config.qos_history_depth)
+        if not self._rclpy.ok():
+            self._rclpy.init(args=None)
+        node_name = "rlinf_ros_robot_adapter"
+        if self.worker_info is not None:
+            node_name = f"{node_name}_{self.worker_info.rank}"
+        self._node = self._rclpy.create_node(node_name)
+        self._state_sub = self._node.create_subscription(
+            self._JointState,
+            self.config.state_topic,
+            self._on_joint_state,
+            self._qos,
+        )
+        self._cmd_pub = self._node.create_publisher(
+            self._JointState,
+            self.config.command_topic,
+            self._qos,
+        )
+        self._gripper_pub = self._node.create_publisher(
+            self._JointState,
+            self.config.gripper_command_topic,
+            self._qos,
+        )
+        self._image_subs = {}
+        for key, topic in self.config.image_topics.items():
+            self._image_subs[key] = self._node.create_subscription(
+                self._Image,
+                topic,
+                lambda msg, k=key: self._on_image(k, msg),
+                self._qos,
+            )
+
+    def _on_joint_state(self, msg):
+        with self._lock:
+            for name, pos in zip(msg.name, msg.position):
+                self._latest_joint_state[name] = float(pos)
+
+    def _on_image(self, key: str, msg):
+        channels = 3
+        if "mono" in msg.encoding:
+            channels = 1
+        array = np.frombuffer(msg.data, dtype=np.uint8)
+        expected = msg.height * msg.width * channels
+        if array.size != expected:
+            return
+        frame = array.reshape((msg.height, msg.width, channels))
+        if channels == 1:
+            frame = np.repeat(frame, 3, axis=2)
+        with self._lock:
+            self._latest_frames[key] = frame
+
+    def _spin_once(self):
+        self._rclpy.spin_once(self._node, timeout_sec=0.01)
+
+    def _build_observation(self):
+        with self._lock:
+            states = np.zeros((self.config.state_dim,), dtype=np.float32)
+            for i, joint_name in enumerate(self.config.joint_names[: self.config.state_dim]):
+                states[i] = self._latest_joint_state.get(joint_name, 0.0)
+            frames = {}
+            for key in self.config.camera_keys:
+                if key in self._latest_frames:
+                    frames[key] = self._latest_frames[key]
+                else:
+                    frames[key] = np.zeros(self.config.image_shape, dtype=np.uint8)
+        return {"state": {"state": states}, "frames": frames}
+
+    def reset(self):
+        start = time.time()
+        while time.time() - start < 2.0:
+            self._spin_once()
+            with self._lock:
+                if self._latest_joint_state:
+                    break
+        if not self._latest_joint_state:
+            self._logger.warning(
+                "No JointState received within timeout; using zero state for reset."
+            )
+        return self._build_observation(), {}
+
+    def step(self, action: np.ndarray):
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        cmd = self._JointState()
+        cmd.name = list(self.config.joint_names[: min(len(action), len(self.config.joint_names))])
+        cmd.position = [float(x) for x in action[: len(cmd.name)]]
+        self._cmd_pub.publish(cmd)
+        if len(action) > len(cmd.name):
+            gripper = self._JointState()
+            gripper.position = [float(x) for x in action[len(cmd.name) :]]
+            self._gripper_pub.publish(gripper)
+        self._spin_once()
+        obs = self._build_observation()
+        reward = 0.0
+        terminated = False
+        truncated = False
+        return obs, reward, terminated, truncated, {}
